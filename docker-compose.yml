@@ -1,0 +1,66 @@
+services:
+  tms-db:
+    container_name: postgres_container
+    image: postgres:16.0
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tms_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/data/postgres
+    networks:
+      - tms_network
+    restart: unless-stopped
+
+  pgadmin:
+    container_name: pgadmin_container
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: congdinh2021@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: congdinh2021
+    ports:
+      - "1999:80"
+    volumes:
+      - pgadmin_data:/root/.pgadmin
+    networks:
+      - tms_network
+    restart: unless-stopped
+    depends_on:
+      - tms-db
+      
+  tms-server:
+    build:
+      context: ./tms-server
+      dockerfile: Dockerfile
+    container_name: tms-server
+    image: congdinh2012/tms-server:latest
+    depends_on:
+      - tms-db
+    ports:
+      - "1990:8080"
+    networks:
+      - tms_network
+
+  tms-client:
+    build:
+      context: ./tms-client
+      dockerfile: Dockerfile
+    container_name: tms-client
+    image: congdinh2012/tms-client:latest
+    depends_on:
+      - tms-server
+    ports:
+      - "2025:80"
+    networks:
+      - tms_network
+
+networks:
+  tms_network:
+
+volumes:
+  postgres_data:
+    driver: local
+  pgadmin_data:
+    driver: local
