@@ -1,0 +1,47 @@
+# Example Terraform variables file
+# Copy this file to terraform.tfvars and customize the values
+
+# AWS Configuration
+aws_region   = "ap-southeast-1"
+environment  = "dev"
+project_name = "tms"
+
+# Instance Configuration
+instance_type = "t3.micro"  # Free tier eligible
+
+# Network Configuration
+vpc_cidr                = "10.0.0.0/16"
+public_subnet_cidrs     = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs    = ["10.0.10.0/24", "10.0.20.0/24"]
+allowed_ssh_cidr        = "0.0.0.0/0"  # Change this to your IP for better security
+
+# SSH Key Configuration
+# Generate a key pair with: ssh-keygen -t rsa -b 4096 -f ~/.ssh/tms-key
+# Then paste the content of ~/.ssh/tms-key.pub here
+public_key_material = ""  # Required: Add your SSH public key here
+
+# Application Configuration
+server_port = 8080
+client_port = 80
+
+# Docker Configuration
+dockerhub_username = ""  # Required: Your Docker Hub username
+server_image_tag   = "latest"
+client_image_tag   = "latest"
+
+# Monitoring Configuration
+enable_monitoring       = true
+enable_cloudwatch_logs  = true
+log_retention_days      = 14
+
+# Auto Scaling Configuration (for future use)
+min_size         = 1
+max_size         = 3
+desired_capacity = 1
+
+# Additional tags
+additional_tags = {
+  Owner       = "DevOps Team"
+  CostCenter  = "Engineering"
+  Compliance  = "SOC2"
+}
