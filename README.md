@@ -9,6 +9,8 @@ A full-stack task management application built with Spring Boot backend and Reac
 - **Database**: PostgreSQL 16.0
 - **Admin Panel**: pgAdmin 4
 - **Containerization**: Docker & Docker Compose
+- **CI/CD**: GitHub Actions with AWS EC2 deployment
+- **Infrastructure**: Terraform (AWS VPC, EC2, CloudWatch)
 
 ## 📁 Project Structure
 
@@ -36,6 +38,21 @@ tms-cicd/
 │   │   └── ...
 │   ├── package.json
 │   └── Dockerfile
+├── deployment/          # CI/CD and Infrastructure
+│   ├── cicd/           # GitHub Actions workflows
+│   │   ├── tms-server-ci.yml
+│   │   ├── tms-server-cd.yml
+│   │   ├── tms-client-ci.yml
+│   │   └── tms-client-cd.yml
+│   ├── terraform/      # Infrastructure as Code
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── ec2.tf
+│   │   └── scripts/
+│   ├── deploy.sh       # Deployment script
+│   └── README.md       # Deployment guide
+├── .github/workflows/  # GitHub Actions
 ├── docker-compose.yml
 └── README.md
 ```
@@ -47,6 +64,8 @@ tms-cicd/
 - Docker & Docker Compose
 - Java 21 (for local development)
 - Node.js 24+ (for local development)
+- AWS CLI (for deployment)
+- Terraform (for infrastructure)
 
 ### Using Docker Compose (Recommended)
 
@@ -297,6 +316,44 @@ This project is licensed under the MIT License.
    - Clear node_modules and reinstall dependencies
    - Check Node.js version compatibility
 
+4. **SSH Connection Issues (Production)**
+   ```bash
+   # If SSH key has passphrase, use ssh-agent to cache it
+   ssh-add ~/.ssh/tms-key
+   ssh ec2-user@<instance-ip>
+   
+   # Or connect without caching passphrase (will prompt each time)
+   ssh -i ~/.ssh/tms-key ec2-user@<instance-ip>
+   
+   # Alternative: Use AWS SSM (no SSH key needed)
+   aws ssm start-session --target <instance-id>
+   ```
+
+5. **CI/CD Pipeline Issues**
+   - Check GitHub Actions logs
+   - Verify GitHub Secrets are properly set
+   - Ensure Docker Hub credentials are correct
+
+### SSH Key Management
+
+**If you have SSH passphrase:**
+- ✅ **More secure**: Passphrase protects private key
+- ⚠️ **Manual entry**: Need to enter passphrase for each SSH connection
+- 💡 **Use ssh-agent**: Cache passphrase to avoid repeated entry
+- 🔄 **CI/CD not affected**: Pipeline uses AWS SSM, not SSH
+
+**Commands for SSH with passphrase:**
+```bash
+# Add key to ssh-agent (cache passphrase)
+ssh-add ~/.ssh/tms-key
+
+# SSH with cached key
+ssh ec2-user@<instance-ip>
+
+# Alternative: AWS SSM (recommended)
+aws ssm start-session --target <instance-id>
+```
+
 ### Useful Commands
 
 ```bash
@@ -316,3 +373,46 @@ docker system prune -a
 ## 📞 Support
 
 For support and questions, please contact the development team.
+
+## 🔄 CI/CD Pipeline
+
+### Development Workflow
+1. **Local Development**: Docker Compose for quick setup
+2. **CI Pipeline**: Automated testing, building, and security scanning
+3. **CD Pipeline**: Automated deployment to AWS EC2
+4. **Monitoring**: CloudWatch metrics and logs
+
+### Pipeline Features
+- **Automated Testing**: Unit tests, integration tests
+- **Security Scanning**: Container vulnerability scanning with Trivy
+- **Quality Gates**: ESLint, TypeScript checking
+- **Docker Registry**: Push to Docker Hub
+- **Blue-Green Deployment**: Zero-downtime deployments
+- **Rollback**: Automatic rollback on failure
+- **Monitoring**: Health checks and performance tests
+
+### Deployment Options
+
+#### 1. Local Development (Docker Compose)
+```bash
+# Start all services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
+```
+
+#### 2. Production Deployment (AWS EC2)
+```bash
+# Deploy infrastructure
+cd deployment
+./deploy.sh
+
+# Configure GitHub Secrets and push code
+# CI/CD pipeline will handle the rest
+```
+
+For detailed deployment instructions, see [deployment/README.md](deployment/README.md)

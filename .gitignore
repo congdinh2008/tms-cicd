@@ -1,1 +1,7 @@
 **/terraform.tfvars
+**/.terraform/*
+**/.terraform.lock.hcl
+**/.terraform-version
+**/terraform.tfstate
+**/terraform.tfstate.backup
+**/deployment-outputs.json

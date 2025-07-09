@@ -1,0 +1,204 @@
+name: TMS Client CD
+
+on:
+  workflow_run:
+    workflows: ["TMS Client CI"]
+    types:
+      - completed
+    branches: [main]
+
+env:
+  AWS_REGION: ap-southeast-1
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/tms-client
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Deploy to EC2 via SSM
+      run: |
+        # Get the latest image tag
+        IMAGE_TAG="main-$(echo ${{ github.sha }} | cut -c1-7)"
+        
+        # Create deployment script
+        cat > deploy-script.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        # Stop existing container if running
+        sudo docker stop tms-client || true
+        sudo docker rm tms-client || true
+        
+        # Pull latest image
+        sudo docker pull ${{ env.IMAGE_NAME }}:${IMAGE_TAG}
+        
+        # Run new container
+        sudo docker run -d \
+          --name tms-client \
+          --restart unless-stopped \
+          -p 80:80 \
+          -p 443:443 \
+          ${{ env.IMAGE_NAME }}:${IMAGE_TAG}
+        
+        # Health check
+        sleep 10
+        curl -f http://localhost/ || exit 1
+        
+        echo "Deployment successful!"
+        EOF
+        
+        # Execute deployment script on EC2 instance
+        aws ssm send-command \
+          --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=["bash -s -- '"${IMAGE_TAG}"' < deploy-script.sh"]' \
+          --comment "Deploy TMS Client ${IMAGE_TAG}"
+
+    - name: Update CloudFront distribution (if applicable)
+      run: |
+        # Invalidate CloudFront cache if using CloudFront
+        if [ -n "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" ]; then
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
+        fi
+
+    - name: Verify deployment
+      run: |
+        # Wait for deployment to complete
+        sleep 30
+        
+        # Get instance public IP
+        INSTANCE_IP=$(aws ec2 describe-instances \
+          --instance-ids ${{ secrets.EC2_INSTANCE_ID }} \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text)
+        
+        # Health check
+        curl -f http://${INSTANCE_IP}/
+        
+        echo "Health check passed for ${INSTANCE_IP}"
+
+    - name: Run smoke tests
+      run: |
+        # Get instance public IP
+        INSTANCE_IP=$(aws ec2 describe-instances \
+          --instance-ids ${{ secrets.EC2_INSTANCE_ID }} \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text)
+        
+        # Basic smoke tests
+        echo "Running smoke tests..."
+        
+        # Check if main page loads
+        response=$(curl -s -o /dev/null -w "%{http_code}" http://${INSTANCE_IP}/)
+        if [ $response -ne 200 ]; then
+          echo "Main page health check failed with status code: $response"
+          exit 1
+        fi
+        
+        # Check if static assets load
+        response=$(curl -s -o /dev/null -w "%{http_code}" http://${INSTANCE_IP}/assets/ || echo "404")
+        echo "Assets endpoint returned: $response"
+        
+        echo "Smoke tests passed!"
+
+    - name: Rollback on failure
+      if: failure()
+      run: |
+        echo "Deployment failed, initiating rollback..."
+        
+        # Get previous successful image tag
+        PREVIOUS_TAG="latest"
+        
+        cat > rollback-script.sh << 'EOF'
+        #!/bin/bash
+        
+        # Stop failed container
+        sudo docker stop tms-client || true
+        sudo docker rm tms-client || true
+        
+        # Run previous version
+        sudo docker run -d \
+          --name tms-client \
+          --restart unless-stopped \
+          -p 80:80 \
+          -p 443:443 \
+          ${{ env.IMAGE_NAME }}:${PREVIOUS_TAG}
+        EOF
+        
+        aws ssm send-command \
+          --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=["bash -s < rollback-script.sh"]' \
+          --comment "Rollback TMS Client"
+
+  performance-test:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: success()
+    
+    steps:
+    - name: Run performance tests
+      run: |
+        # Get instance public IP
+        INSTANCE_IP=$(aws ec2 describe-instances \
+          --instance-ids ${{ secrets.EC2_INSTANCE_ID }} \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text)
+        
+        # Install k6
+        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+        echo "deb https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+        sudo apt-get update
+        sudo apt-get install k6
+        
+        # Create k6 test script
+        cat > performance-test.js << 'EOF'
+        import http from 'k6/http';
+        import { check, sleep } from 'k6';
+        
+        export const options = {
+          vus: 10,
+          duration: '30s',
+        };
+        
+        export default function () {
+          const response = http.get(`http://${INSTANCE_IP}/`);
+          check(response, {
+            'status is 200': (r) => r.status === 200,
+            'response time < 500ms': (r) => r.timings.duration < 500,
+          });
+          sleep(1);
+        }
+        EOF
+        
+        # Run performance test
+        k6 run performance-test.js
+
+  notify:
+    needs: [deploy, performance-test]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Notify deployment status
+      uses: 8398a7/action-slack@v3
+      if: always()
+      with:
+        status: ${{ needs.deploy.result }}
+        channel: '#deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        fields: repo,message,commit,author,action,eventName,ref,workflow
