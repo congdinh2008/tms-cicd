@@ -38,16 +38,24 @@ tms-cicd/
 │   │   └── ...
 │   ├── package.json
 │   └── Dockerfile
-├── deployment/          # CI/CD and Infrastructure
-│   ├── cicd/           # GitHub Actions workflows
-│   │   ├── tms-server-ci.yml
-│   │   ├── tms-server-cd.yml
-│   │   ├── tms-client-ci.yml
-│   │   └── tms-client-cd.yml
-│   ├── terraform/      # Infrastructure as Code
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   ├── outputs.tf
+├── .github/workflows/   # CI/CD Workflows (Optimized)
+│   ├── reusable-ci.yml      # Reusable CI workflow
+│   ├── reusable-cd.yml      # Reusable CD workflow
+│   ├── tms-server-ci.yml    # Server CI (uses reusable)
+│   ├── tms-server-cd.yml    # Server CD (uses reusable)
+│   ├── tms-client-ci.yml    # Client CI (uses reusable)
+│   └── tms-client-cd.yml    # Client CD (uses reusable)
+├── deployment/          # Infrastructure and Scripts
+│   ├── terraform/      # Modularized Infrastructure as Code
+│   │   ├── main.tf            # Main configuration
+│   │   ├── variables.tf       # Input variables
+│   │   ├── outputs.tf         # Output values
+│   │   ├── terraform.tfvars.example
+│   │   └── modules/
+│   │       ├── networking/    # VPC, subnets, security
+│   │       ├── security/      # IAM roles, policies
+│   │       ├── compute/       # EC2 instances, user data
+│   │       └── monitoring/    # CloudWatch, alarms
 │   │   ├── ec2.tf
 │   │   └── scripts/
 │   ├── deploy.sh       # Deployment script

@@ -1,131 +1,177 @@
 # Output values for TMS infrastructure
 
-# VPC outputs
+# Module Outputs
+output "networking" {
+  description = "Networking module outputs"
+  value = {
+    vpc_id              = module.networking.vpc_id
+    vpc_cidr_block      = module.networking.vpc_cidr_block
+    public_subnet_ids   = module.networking.public_subnet_ids
+    private_subnet_ids  = module.networking.private_subnet_ids
+    internet_gateway_id = module.networking.internet_gateway_id
+    nat_gateway_ids     = module.networking.nat_gateway_ids
+  }
+}
+
+output "security" {
+  description = "Security module outputs"
+  value = {
+    web_security_group_id = module.security.web_security_group_id
+    key_pair_name         = module.security.key_pair_name
+    ec2_role_arn          = module.security.ec2_role_arn
+    ec2_instance_profile  = module.security.ec2_instance_profile_name
+    kms_key_id            = module.security.kms_key_id
+  }
+}
+
+output "compute" {
+  description = "Compute module outputs"
+  value = {
+    server_instance_id = module.compute.server_instance_id
+    client_instance_id = module.compute.client_instance_id
+    server_public_ip   = module.compute.server_public_ip
+    client_public_ip   = module.compute.client_public_ip
+    server_private_ip  = module.compute.server_private_ip
+    client_private_ip  = module.compute.client_private_ip
+    server_asg_name    = module.compute.server_asg_name
+    client_asg_name    = module.compute.client_asg_name
+  }
+}
+
+output "monitoring" {
+  description = "Monitoring module outputs"
+  value = {
+    server_log_group      = module.monitoring.server_log_group_name
+    client_log_group      = module.monitoring.client_log_group_name
+    sns_topic_arn         = module.monitoring.sns_topic_arn
+    dashboard_url         = module.monitoring.dashboard_url
+    cloudwatch_log_groups = module.monitoring.cloudwatch_log_groups
+  }
+}
+
+# Legacy Outputs for Backward Compatibility
 output "vpc_id" {
   description = "ID of the VPC"
-  value       = aws_vpc.tms_vpc.id
+  value       = module.networking.vpc_id
 }
 
 output "vpc_cidr_block" {
   description = "CIDR block of the VPC"
-  value       = aws_vpc.tms_vpc.cidr_block
+  value       = module.networking.vpc_cidr_block
 }
 
-# Subnet outputs
 output "public_subnet_ids" {
   description = "IDs of the public subnets"
-  value       = aws_subnet.public_subnets[*].id
+  value       = module.networking.public_subnet_ids
 }
 
 output "private_subnet_ids" {
   description = "IDs of the private subnets"
-  value       = aws_subnet.private_subnets[*].id
+  value       = module.networking.private_subnet_ids
 }
 
-# Security Group outputs
 output "web_security_group_id" {
   description = "ID of the web security group"
-  value       = aws_security_group.web_sg.id
+  value       = module.security.web_security_group_id
 }
 
-# EC2 Instance outputs
 output "server_instance_id" {
   description = "ID of the TMS server instance"
-  value       = aws_instance.tms_server.id
+  value       = module.compute.server_instance_id
 }
 
 output "client_instance_id" {
   description = "ID of the TMS client instance"
-  value       = aws_instance.tms_client.id
+  value       = module.compute.client_instance_id
 }
 
 output "server_public_ip" {
   description = "Public IP address of the TMS server"
-  value       = aws_eip.server_eip.public_ip
+  value       = module.compute.server_public_ip
 }
 
 output "client_public_ip" {
   description = "Public IP address of the TMS client"
-  value       = aws_eip.client_eip.public_ip
+  value       = module.compute.client_public_ip
 }
 
 output "server_private_ip" {
   description = "Private IP address of the TMS server"
-  value       = aws_instance.tms_server.private_ip
+  value       = module.compute.server_private_ip
 }
 
 output "client_private_ip" {
   description = "Private IP address of the TMS client"
-  value       = aws_instance.tms_client.private_ip
+  value       = module.compute.client_private_ip
 }
 
 # Application URLs
 output "server_url" {
   description = "URL for the TMS server application"
-  value       = "http://${aws_eip.server_eip.public_ip}:${var.server_port}"
+  value       = module.compute.server_url
 }
 
 output "client_url" {
   description = "URL for the TMS client application"
-  value       = "http://${aws_eip.client_eip.public_ip}"
+  value       = module.compute.client_url
 }
 
 output "server_health_check_url" {
   description = "Health check URL for the TMS server"
-  value       = "http://${aws_eip.server_eip.public_ip}:${var.server_port}/actuator/health"
+  value       = module.compute.server_health_check_url
 }
 
 # SSH connection commands
 output "server_ssh_command" {
   description = "SSH command to connect to the server instance"
-  value       = "ssh -i ~/.ssh/${aws_key_pair.tms_key.key_name}.pem ec2-user@${aws_eip.server_eip.public_ip}"
+  value       = module.compute.server_public_ip != null ? "ssh -i ~/.ssh/${module.security.key_pair_name}.pem ec2-user@${module.compute.server_public_ip}" : null
 }
 
 output "client_ssh_command" {
   description = "SSH command to connect to the client instance"
-  value       = "ssh -i ~/.ssh/${aws_key_pair.tms_key.key_name}.pem ec2-user@${aws_eip.client_eip.public_ip}"
+  value       = module.compute.client_public_ip != null ? "ssh -i ~/.ssh/${module.security.key_pair_name}.pem ec2-user@${module.compute.client_public_ip}" : null
 }
 
-# Key Pair outputs
 output "key_pair_name" {
   description = "Name of the AWS key pair"
-  value       = aws_key_pair.tms_key.key_name
+  value       = module.security.key_pair_name
 }
 
-# IAM outputs
 output "ec2_role_arn" {
   description = "ARN of the EC2 IAM role"
-  value       = var.create_iam_resources ? aws_iam_role.ec2_role[0].arn : null
+  value       = module.security.ec2_role_arn
 }
 
 output "ec2_instance_profile_name" {
   description = "Name of the EC2 instance profile"
-  value       = var.create_iam_resources ? aws_iam_instance_profile.ec2_profile[0].name : null
+  value       = module.security.ec2_instance_profile_name
 }
 
-# CloudWatch outputs
 output "server_log_group_name" {
   description = "Name of the server CloudWatch log group"
-  value       = var.create_cloudwatch_resources ? aws_cloudwatch_log_group.server_logs[0].name : null
+  value       = module.monitoring.server_log_group_name
 }
 
 output "client_log_group_name" {
   description = "Name of the client CloudWatch log group"
-  value       = var.create_cloudwatch_resources ? aws_cloudwatch_log_group.client_logs[0].name : null
+  value       = module.monitoring.client_log_group_name
 }
 
 # Deployment information
 output "deployment_info" {
   description = "Important deployment information"
   value = {
-    region                = var.aws_region
+    region               = var.aws_region
     environment          = var.environment
-    server_instance_id   = aws_instance.tms_server.id
-    client_instance_id   = aws_instance.tms_client.id
-    server_public_ip     = aws_eip.server_eip.public_ip
-    client_public_ip     = aws_eip.client_eip.public_ip
-    vpc_id              = aws_vpc.tms_vpc.id
-    security_group_id   = aws_security_group.web_sg.id
+    project_name         = var.project_name
+    server_instance_id   = module.compute.server_instance_id
+    client_instance_id   = module.compute.client_instance_id
+    server_public_ip     = module.compute.server_public_ip
+    client_public_ip     = module.compute.client_public_ip
+    vpc_id               = module.networking.vpc_id
+    security_group_id    = module.security.web_security_group_id
+    key_pair_name        = module.security.key_pair_name
+    auto_scaling_enabled = var.enable_auto_scaling
   }
 }
 
@@ -133,11 +179,12 @@ output "deployment_info" {
 output "github_secrets_info" {
   description = "Information needed for GitHub Actions secrets"
   value = {
-    AWS_REGION                = var.aws_region
-    EC2_SERVER_INSTANCE_ID    = aws_instance.tms_server.id
-    EC2_CLIENT_INSTANCE_ID    = aws_instance.tms_client.id
-    SERVER_PUBLIC_IP          = aws_eip.server_eip.public_ip
-    CLIENT_PUBLIC_IP          = aws_eip.client_eip.public_ip
+    AWS_REGION             = var.aws_region
+    EC2_SERVER_INSTANCE_ID = module.compute.server_instance_id
+    EC2_CLIENT_INSTANCE_ID = module.compute.client_instance_id
+    SERVER_PUBLIC_IP       = module.compute.server_public_ip
+    CLIENT_PUBLIC_IP       = module.compute.client_public_ip
+    DOCKERHUB_USERNAME_VAR = "Set manually: ${var.dockerhub_username}"
   }
   sensitive = false
 }

@@ -7,226 +7,146 @@ terraform {
       version = "~> 5.0"
     }
   }
-  
-  # Uncomment and configure for remote state storage
+
+  # Backend configuration for remote state (optional)
+  # Uncomment and configure for production use
   # backend "s3" {
-  #   bucket = "your-terraform-state-bucket"
-  #   key    = "tms/terraform.tfstate"
-  #   region = "us-east-1"
+  #   bucket         = "your-terraform-state-bucket"
+  #   key            = "tms/terraform.tfstate"
+  #   region         = "ap-southeast-1"
+  #   encrypt        = true
+  #   dynamodb_table = "terraform-state-lock"
   # }
 }
 
 provider "aws" {
   region = var.aws_region
-  
+
   default_tags {
-    tags = {
-      Project     = "TMS"
-      Environment = var.environment
-      ManagedBy   = "Terraform"
-    }
-  }
-}
-
-# Data sources
-data "aws_availability_zones" "available" {
-  state = "available"
-}
-
-data "aws_ami" "amazon_linux" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
+    tags = local.common_tags
   }
 }
 
 # Local values
 locals {
+  name_prefix = "${var.project_name}-${var.environment}"
   common_tags = {
-    Project     = "TMS"
+    Project     = var.project_name
     Environment = var.environment
     ManagedBy   = "Terraform"
+    Owner       = var.owner
+    CostCenter  = var.cost_center
   }
 }
 
-# VPC and Networking
-resource "aws_vpc" "tms_vpc" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_hostnames = true
-  enable_dns_support   = true
+# Networking Module
+module "networking" {
+  source = "./modules/networking"
 
-  tags = merge(local.common_tags, {
-    Name = "${var.project_name}-vpc-${var.environment}"
-  })
+  name_prefix          = local.name_prefix
+  common_tags          = local.common_tags
+  region               = var.aws_region
+  environment          = var.environment
+  vpc_cidr             = var.vpc_cidr
+  public_subnet_cidrs  = var.public_subnet_cidrs
+  private_subnet_cidrs = var.private_subnet_cidrs
+  enable_nat_gateway   = var.enable_nat_gateway
+  enable_vpc_endpoints = var.enable_vpc_endpoints
+  enable_network_acls  = var.enable_network_acls
 }
 
-resource "aws_internet_gateway" "tms_igw" {
-  vpc_id = aws_vpc.tms_vpc.id
+# Security Module
+module "security" {
+  source = "./modules/security"
 
-  tags = merge(local.common_tags, {
-    Name = "${var.project_name}-igw-${var.environment}"
-  })
+  name_prefix          = local.name_prefix
+  common_tags          = local.common_tags
+  region               = var.aws_region
+  vpc_id               = module.networking.vpc_id
+  create_iam_resources = var.create_iam_resources
+  create_key_pair      = true
+  public_key_material  = var.public_key_material
+  enable_kms           = var.enable_kms
+  enable_waf           = var.enable_waf
+
+  ingress_rules = [
+    {
+      from_port   = 80
+      to_port     = 80
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+      description = "HTTP access"
+    },
+    {
+      from_port   = 443
+      to_port     = 443
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+      description = "HTTPS access"
+    },
+    {
+      from_port   = 8080
+      to_port     = 8080
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+      description = "Spring Boot application"
+    },
+    {
+      from_port   = 22
+      to_port     = 22
+      protocol    = "tcp"
+      cidr_blocks = [var.allowed_ssh_cidr]
+      description = "SSH access"
+    }
+  ]
 }
 
-resource "aws_subnet" "public_subnets" {
-  count = length(var.public_subnet_cidrs)
+# Compute Module
+module "compute" {
+  source = "./modules/compute"
 
-  vpc_id                  = aws_vpc.tms_vpc.id
-  cidr_block              = var.public_subnet_cidrs[count.index]
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
-  map_public_ip_on_launch = true
-
-  tags = merge(local.common_tags, {
-    Name = "${var.project_name}-public-subnet-${count.index + 1}-${var.environment}"
-    Type = "Public"
-  })
+  name_prefix               = local.name_prefix
+  common_tags               = local.common_tags
+  environment               = var.environment
+  enable_auto_scaling       = var.enable_auto_scaling
+  instance_type             = var.instance_type
+  key_name                  = module.security.key_pair_name
+  security_group_id         = module.security.web_security_group_id
+  subnet_ids                = module.networking.public_subnet_ids
+  iam_instance_profile_name = module.security.ec2_instance_profile_name
+  enable_monitoring         = var.enable_monitoring
+  root_volume_size          = var.root_volume_size
+  kms_key_id                = module.security.kms_key_id
+  dockerhub_username        = var.dockerhub_username
+  server_image_tag          = var.server_image_tag
+  client_image_tag          = var.client_image_tag
+  server_port               = var.server_port
+  client_port               = var.client_port
+  enable_cloudwatch_logs    = var.enable_cloudwatch_logs
+  min_size                  = var.min_size
+  max_size                  = var.max_size
+  desired_capacity          = var.desired_capacity
 }
 
-resource "aws_subnet" "private_subnets" {
-  count = length(var.private_subnet_cidrs)
+# Monitoring Module
+module "monitoring" {
+  source = "./modules/monitoring"
 
-  vpc_id            = aws_vpc.tms_vpc.id
-  cidr_block        = var.private_subnet_cidrs[count.index]
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-
-  tags = merge(local.common_tags, {
-    Name = "${var.project_name}-private-subnet-${count.index + 1}-${var.environment}"
-    Type = "Private"
-  })
-}
-
-# Route Tables
-resource "aws_route_table" "public_rt" {
-  vpc_id = aws_vpc.tms_vpc.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.tms_igw.id
-  }
-
-  tags = merge(local.common_tags, {
-    Name = "${var.project_name}-public-rt-${var.environment}"
-  })
-}
-
-resource "aws_route_table_association" "public_rta" {
-  count = length(aws_subnet.public_subnets)
-
-  subnet_id      = aws_subnet.public_subnets[count.index].id
-  route_table_id = aws_route_table.public_rt.id
-}
-
-# Security Groups
-resource "aws_security_group" "web_sg" {
-  name_prefix = "${var.project_name}-web-sg-"
-  vpc_id      = aws_vpc.tms_vpc.id
-
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTP access"
-  }
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTPS access"
-  }
-
-  ingress {
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Spring Boot application"
-  }
-
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-    description = "SSH access"
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "All outbound traffic"
-  }
-
-  tags = merge(local.common_tags, {
-    Name = "${var.project_name}-web-sg-${var.environment}"
-  })
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-# IAM Role for EC2 instances
-resource "aws_iam_role" "ec2_role" {
-  count = var.create_iam_resources ? 1 : 0
-
-  name = "${var.project_name}-ec2-role-${var.environment}"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = local.common_tags
-}
-
-resource "aws_iam_role_policy_attachment" "ec2_ssm_policy" {
-  count = var.create_iam_resources ? 1 : 0
-
-  role       = aws_iam_role.ec2_role[0].name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_role_policy_attachment" "ec2_cloudwatch_policy" {
-  count = var.create_iam_resources ? 1 : 0
-
-  role       = aws_iam_role.ec2_role[0].name
-  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-}
-
-resource "aws_iam_instance_profile" "ec2_profile" {
-  count = var.create_iam_resources ? 1 : 0
-
-  name = "${var.project_name}-ec2-profile-${var.environment}"
-  role = aws_iam_role.ec2_role[0].name
-
-  tags = local.common_tags
-}
-
-# Key Pair
-resource "aws_key_pair" "tms_key" {
-  key_name   = "${var.project_name}-key-${var.environment}"
-  public_key = var.public_key_material
-
-  tags = local.common_tags
+  name_prefix          = local.name_prefix
+  common_tags          = local.common_tags
+  region               = var.aws_region
+  enable_cloudwatch    = var.enable_cloudwatch_logs
+  enable_alerting      = var.enable_alerting
+  enable_health_checks = var.enable_health_checks
+  log_retention_days   = var.log_retention_days
+  alert_email          = var.alert_email
+  server_instance_id   = module.compute.server_instance_id
+  client_instance_id   = module.compute.client_instance_id
+  server_public_ip     = module.compute.server_public_ip
+  client_public_ip     = module.compute.client_public_ip
+  server_port          = var.server_port
+  cpu_threshold        = var.cpu_threshold
+  memory_threshold     = var.memory_threshold
+  disk_threshold       = var.disk_threshold
+  error_threshold      = var.error_threshold
 }

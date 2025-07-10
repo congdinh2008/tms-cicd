@@ -1,0 +1,273 @@
+name: Reusable CI Workflow
+
+on:
+  workflow_call:
+    inputs:
+      application:
+        required: true
+        type: string
+        description: 'Application name (server or client)'
+      build_context:
+        required: true
+        type: string
+        description: 'Build context directory'
+      dockerfile_path:
+        required: false
+        type: string
+        default: 'Dockerfile'
+        description: 'Path to Dockerfile'
+      test_command:
+        required: false
+        type: string
+        description: 'Test command to run'
+      build_command:
+        required: false
+        type: string
+        description: 'Build command to run'
+      node_version:
+        required: false
+        type: string
+        default: '20'
+        description: 'Node.js version for frontend builds'
+      java_version:
+        required: false
+        type: string
+        default: '21'
+        description: 'Java version for backend builds'
+      java_distribution:
+        required: false
+        type: string
+        default: 'corretto'
+        description: 'Java distribution'
+      enable_security_scan:
+        required: false
+        type: boolean
+        default: true
+        description: 'Enable security scanning'
+      enable_quality_checks:
+        required: false
+        type: boolean
+        default: true
+        description: 'Enable code quality checks'
+      docker_platforms:
+        required: false
+        type: string
+        default: 'linux/amd64,linux/arm64'
+        description: 'Docker platforms to build for'
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+      SONAR_TOKEN:
+        required: false
+    outputs:
+      image-tag:
+        description: "Docker image tag"
+        value: ${{ jobs.build.outputs.image-tag }}
+      image-digest:
+        description: "Docker image digest"
+        value: ${{ jobs.build.outputs.image-digest }}
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/tms-${{ inputs.application }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # Java setup for backend
+    - name: Set up JDK ${{ inputs.java_version }}
+      if: inputs.application == 'server'
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java_version }}
+        distribution: ${{ inputs.java_distribution }}
+
+    - name: Cache Maven packages
+      if: inputs.application == 'server'
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: ${{ runner.os }}-m2
+
+    # Node.js setup for frontend
+    - name: Set up Node.js ${{ inputs.node_version }}
+      if: inputs.application == 'client'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node_version }}
+        cache: 'npm'
+        cache-dependency-path: ${{ inputs.build_context }}/package-lock.json
+
+    - name: Install dependencies
+      if: inputs.application == 'client'
+      run: |
+        cd ${{ inputs.build_context }}
+        npm ci
+
+    # Quality checks for frontend
+    - name: Run ESLint
+      if: inputs.application == 'client' && inputs.enable_quality_checks
+      run: |
+        cd ${{ inputs.build_context }}
+        npm run lint
+
+    - name: Run TypeScript checking
+      if: inputs.application == 'client' && inputs.enable_quality_checks
+      run: |
+        cd ${{ inputs.build_context }}
+        npx tsc --noEmit
+
+    # Run tests
+    - name: Run tests
+      if: inputs.test_command != ''
+      run: |
+        cd ${{ inputs.build_context }}
+        ${{ inputs.test_command }}
+
+    # Generate test reports for Java
+    - name: Generate test report
+      if: inputs.application == 'server' && (success() || failure())
+      uses: dorny/test-reporter@v1
+      with:
+        name: ${{ inputs.application }} Tests
+        path: ${{ inputs.build_context }}/target/surefire-reports/*.xml
+        reporter: java-junit
+
+    # Build application
+    - name: Build application
+      if: inputs.build_command != ''
+      run: |
+        cd ${{ inputs.build_context }}
+        ${{ inputs.build_command }}
+
+    # Upload build artifacts for frontend
+    - name: Upload build artifacts
+      if: inputs.application == 'client'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.application }}-build-files
+        path: ${{ inputs.build_context }}/dist/
+        retention-days: 1
+
+  code-quality:
+    runs-on: ubuntu-latest
+    if: inputs.enable_quality_checks
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Shallow clones should be disabled for better analysis
+
+    # SonarQube step will be added later if needed
+
+  build:
+    needs: [test]
+    runs-on: ubuntu-latest
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # Setup for building
+    - name: Set up JDK ${{ inputs.java_version }}
+      if: inputs.application == 'server'
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java_version }}
+        distribution: ${{ inputs.java_distribution }}
+
+    - name: Cache Maven packages
+      if: inputs.application == 'server'
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: ${{ runner.os }}-m2
+
+    - name: Set up Node.js ${{ inputs.node_version }}
+      if: inputs.application == 'client'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node_version }}
+        cache: 'npm'
+        cache-dependency-path: ${{ inputs.build_context }}/package-lock.json
+
+    # Build application before Docker
+    - name: Build with Maven
+      if: inputs.application == 'server'
+      run: |
+        cd ${{ inputs.build_context }}
+        ./mvnw clean package -DskipTests
+
+    - name: Install dependencies and build
+      if: inputs.application == 'client'
+      run: |
+        cd ${{ inputs.build_context }}
+        npm ci
+        npm run build
+
+    # Docker setup
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: ${{ inputs.build_context }}
+        file: ${{ inputs.build_context }}/${{ inputs.dockerfile_path }}
+        platforms: ${{ inputs.docker_platforms }}
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  security-scan:
+    needs: build
+    runs-on: ubuntu-latest
+    if: inputs.enable_security_scan
+    
+    steps:
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ needs.build.outputs.image-tag }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'

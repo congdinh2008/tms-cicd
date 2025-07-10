@@ -1,47 +1,113 @@
-# Example Terraform variables file
-# Copy this file to terraform.tfvars and customize the values
+# TMS Terraform Configuration Variables
+# =====================================
+# This file contains all configurable variables for the TMS infrastructure.
+# Copy this file to terraform.tfvars and customize the values for your environment.
+
+# Quick Start Guide:
+# 1. Copy this file: cp terraform.tfvars.example terraform.tfvars
+# 2. Update required fields: public_key_material, dockerhub_username
+# 3. Adjust feature flags based on your AWS permissions
+# 4. Run: terraform init && terraform plan
 
 # AWS Configuration
-aws_region   = "ap-southeast-1"
-environment  = "dev"
-project_name = "tms"
+aws_region   = "ap-southeast-1"  # Choose your preferred AWS region
+environment  = "dev"             # Options: dev, staging, prod
+project_name = "tms"             # Project identifier for resource naming
 
-# Instance Configuration
-instance_type = "t3.micro"  # Free tier eligible
+# Project Information
+owner       = "DevOps Team"      # Team or person responsible for this infrastructure
+cost_center = "Engineering"     # For cost allocation and billing
+
+# Feature Flags - Enable/disable features based on your AWS permissions and requirements
+# ===================================================================================
+
+# IAM Resources: Required for most features, disable if you lack IAM permissions
+create_iam_resources     = true   
+
+# Auto Scaling: Use Auto Scaling Groups instead of single instances (recommended for production)
+enable_auto_scaling      = false  
+
+# NAT Gateway: Enables internet access for private subnets (incurs costs)
+enable_nat_gateway       = false  
+
+# VPC Endpoints: Reduces data transfer costs for AWS services
+enable_vpc_endpoints     = false  
+
+# Network ACLs: Additional network security layer beyond security groups
+enable_network_acls      = false  
+
+# KMS Encryption: Encrypts EBS volumes and other AWS resources
+enable_kms               = true   
+
+# AWS WAF: Web Application Firewall for protection against common web exploits
+enable_waf               = false  
+
+# CloudWatch Logs: Centralized logging for applications and infrastructure
+enable_cloudwatch_logs   = true   
+
+# SNS Alerting: Email notifications for alarms (requires alert_email to be set)
+enable_alerting          = false  
+
+# Route53 Health Checks: External health monitoring (incurs costs)
+enable_health_checks     = false  
 
 # Network Configuration
-vpc_cidr                = "10.0.0.0/16"
-public_subnet_cidrs     = ["10.0.1.0/24", "10.0.2.0/24"]
-private_subnet_cidrs    = ["10.0.10.0/24", "10.0.20.0/24"]
-allowed_ssh_cidr        = "0.0.0.0/0"  # Change this to your IP for better security
+# ====================
+vpc_cidr             = "10.0.0.0/16"                        # VPC IP range
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]      # Public subnets for load balancers/NAT gateways
+private_subnet_cidrs = ["10.0.10.0/24", "10.0.20.0/24"]    # Private subnets for application instances
+allowed_ssh_cidr     = "0.0.0.0/0"  # SECURITY: Change to your IP (e.g., "203.0.113.0/32") for better security
+
+# EC2 Configuration
+# ================
+instance_type    = "t3.micro"  # AWS Free Tier eligible, upgrade to t3.small/medium for production
+enable_monitoring = true        # Enable detailed CloudWatch monitoring
+root_volume_size = 20          # Root volume size in GB (minimum: 8, maximum: 100)
 
 # SSH Key Configuration
-# Generate a key pair with: ssh-keygen -t rsa -b 4096 -f ~/.ssh/tms-key
-# Then paste the content of ~/.ssh/tms-key.pub here
+# ====================
+# IMPORTANT: Generate a key pair first:
+#   ssh-keygen -t rsa -b 4096 -f ~/.ssh/tms-key
+# Then paste the content of ~/.ssh/tms-key.pub below:
 public_key_material = ""  # Required: Add your SSH public key here
 
 # Application Configuration
-server_port = 8080
-client_port = 80
+# =========================
+server_port = 8080  # Spring Boot application port
+client_port = 80    # React application port (Nginx)
 
 # Docker Configuration
-dockerhub_username = ""  # Required: Your Docker Hub username
-server_image_tag   = "latest"
-client_image_tag   = "latest"
+# ===================
+dockerhub_username = ""        # Required: Your Docker Hub username
+server_image_tag   = "latest"  # Docker image tag for TMS server
+client_image_tag   = "latest"  # Docker image tag for TMS client
 
-# Monitoring Configuration
-enable_monitoring       = true
-enable_cloudwatch_logs  = true
-log_retention_days      = 14
+# Auto Scaling Configuration (used when enable_auto_scaling = true)
+# ================================================================
+min_size         = 1  # Minimum number of instances
+max_size         = 3  # Maximum number of instances
+desired_capacity = 1  # Initial number of instances
 
-# Auto Scaling Configuration (for future use)
-min_size         = 1
-max_size         = 3
-desired_capacity = 1
+# Monitoring & Alerting Configuration
+# ==================================
+log_retention_days = 14  # CloudWatch log retention (1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653)
+alert_email        = ""  # Required if enable_alerting = true (e.g., "admin@yourcompany.com")
 
-# Additional tags
-additional_tags = {
-  Owner       = "DevOps Team"
-  CostCenter  = "Engineering"
-  Compliance  = "SOC2"
-}
+# Alarm Thresholds (percentages and counts)
+# =========================================
+cpu_threshold    = 80  # CPU utilization alarm threshold (%)
+memory_threshold = 80  # Memory utilization alarm threshold (%)
+disk_threshold   = 80  # Disk utilization alarm threshold (%)
+error_threshold  = 10  # Error count alarm threshold
+
+# Example Production Configuration:
+# ================================
+# For production environments, consider these settings:
+# - environment = "prod"
+# - instance_type = "t3.small" or higher
+# - enable_auto_scaling = true
+# - enable_nat_gateway = true (if using private subnets)
+# - enable_alerting = true
+# - alert_email = "your-ops-team@company.com"
+# - allowed_ssh_cidr = "your.office.ip/32"
+# - min_size = 2, max_size = 6, desired_capacity = 2

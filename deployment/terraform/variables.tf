@@ -10,6 +10,11 @@ variable "environment" {
   description = "Environment name (dev, staging, prod)"
   type        = string
   default     = "dev"
+
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "Environment must be one of: dev, staging, prod."
+  }
 }
 
 variable "project_name" {
@@ -18,15 +23,75 @@ variable "project_name" {
   default     = "tms"
 }
 
+variable "owner" {
+  description = "Project owner"
+  type        = string
+  default     = "DevOps Team"
+}
+
+variable "cost_center" {
+  description = "Cost center for billing"
+  type        = string
+  default     = "Engineering"
+}
+
 # Feature flags
 variable "create_iam_resources" {
-  description = "Whether to create IAM roles and instance profiles (requires IAM permissions)"
+  description = "Whether to create IAM roles and instance profiles"
+  type        = bool
+  default     = true
+}
+
+variable "enable_auto_scaling" {
+  description = "Enable Auto Scaling Groups instead of standalone instances"
   type        = bool
   default     = false
 }
 
-variable "create_cloudwatch_resources" {
-  description = "Whether to create CloudWatch log groups and alarms (requires CloudWatch permissions)"
+variable "enable_nat_gateway" {
+  description = "Enable NAT Gateway for private subnets"
+  type        = bool
+  default     = false
+}
+
+variable "enable_vpc_endpoints" {
+  description = "Enable VPC endpoints for cost optimization"
+  type        = bool
+  default     = false
+}
+
+variable "enable_network_acls" {
+  description = "Enable Network ACLs for additional security"
+  type        = bool
+  default     = false
+}
+
+variable "enable_kms" {
+  description = "Enable KMS encryption"
+  type        = bool
+  default     = true
+}
+
+variable "enable_waf" {
+  description = "Enable AWS WAF"
+  type        = bool
+  default     = false
+}
+
+variable "enable_cloudwatch_logs" {
+  description = "Enable CloudWatch logs"
+  type        = bool
+  default     = true
+}
+
+variable "enable_alerting" {
+  description = "Enable SNS alerting"
+  type        = bool
+  default     = false
+}
+
+variable "enable_health_checks" {
+  description = "Enable Route53 health checks"
   type        = bool
   default     = false
 }
@@ -36,6 +101,11 @@ variable "vpc_cidr" {
   description = "CIDR block for VPC"
   type        = string
   default     = "10.0.0.0/16"
+
+  validation {
+    condition     = can(cidrhost(var.vpc_cidr, 0))
+    error_message = "VPC CIDR must be a valid IPv4 CIDR block."
+  }
 }
 
 variable "public_subnet_cidrs" {
@@ -53,26 +123,42 @@ variable "private_subnet_cidrs" {
 variable "allowed_ssh_cidr" {
   description = "CIDR block allowed to SSH to instances"
   type        = string
-  default     = "0.0.0.0/0"  # Change this to your IP range for better security
+  default     = "0.0.0.0/0"
 }
 
 # EC2 variables
 variable "instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "t3.micro"  # Free tier eligible
+  default     = "t3.micro"
+
+  validation {
+    condition     = contains(["t2.micro", "t2.small", "t3.micro", "t3.small", "t3.medium"], var.instance_type)
+    error_message = "Instance type must be a valid EC2 instance type."
+  }
 }
 
 variable "public_key_material" {
   description = "SSH public key material for EC2 instances"
   type        = string
-  default     = ""  # You need to provide this
+  default     = ""
 }
 
 variable "enable_monitoring" {
   description = "Enable detailed monitoring for EC2 instances"
   type        = bool
   default     = true
+}
+
+variable "root_volume_size" {
+  description = "Root volume size in GB"
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.root_volume_size >= 8 && var.root_volume_size <= 100
+    error_message = "Root volume size must be between 8 and 100 GB."
+  }
 }
 
 # Application variables
@@ -107,19 +193,6 @@ variable "desired_capacity" {
   default     = 1
 }
 
-# Application Load Balancer variables
-variable "enable_alb" {
-  description = "Enable Application Load Balancer"
-  type        = bool
-  default     = true
-}
-
-variable "health_check_path" {
-  description = "Health check path for load balancer"
-  type        = string
-  default     = "/actuator/health"
-}
-
 # Docker Hub variables
 variable "dockerhub_username" {
   description = "Docker Hub username"
@@ -139,97 +212,70 @@ variable "client_image_tag" {
   default     = "latest"
 }
 
-# Database variables (for future RDS integration)
-variable "enable_rds" {
-  description = "Enable RDS database"
-  type        = bool
-  default     = false
-}
-
-variable "db_engine" {
-  description = "Database engine"
-  type        = string
-  default     = "mysql"
-}
-
-variable "db_engine_version" {
-  description = "Database engine version"
-  type        = string
-  default     = "8.0"
-}
-
-variable "db_instance_class" {
-  description = "RDS instance class"
-  type        = string
-  default     = "db.t3.micro"
-}
-
-variable "db_allocated_storage" {
-  description = "Allocated storage for RDS in GB"
-  type        = number
-  default     = 20
-}
-
-variable "db_name" {
-  description = "Database name"
-  type        = string
-  default     = "tmsdb"
-}
-
-variable "db_username" {
-  description = "Database username"
-  type        = string
-  default     = "admin"
-}
-
-# Backup and maintenance variables
-variable "backup_retention_days" {
-  description = "Number of days to retain backups"
-  type        = number
-  default     = 7
-}
-
-variable "maintenance_window" {
-  description = "Maintenance window for RDS"
-  type        = string
-  default     = "sun:03:00-sun:04:00"
-}
-
-variable "backup_window" {
-  description = "Backup window for RDS"
-  type        = string
-  default     = "02:00-03:00"
-}
-
-# CloudWatch and monitoring variables
-variable "enable_cloudwatch_logs" {
-  description = "Enable CloudWatch logs"
-  type        = bool
-  default     = true
-}
-
+# Monitoring variables
 variable "log_retention_days" {
   description = "CloudWatch log retention in days"
   type        = number
   default     = 14
+
+  validation {
+    condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653], var.log_retention_days)
+    error_message = "Log retention days must be a valid CloudWatch retention value."
+  }
 }
 
-# SSL/TLS variables
-variable "enable_ssl" {
-  description = "Enable SSL/TLS certificate"
-  type        = bool
-  default     = false
-}
-
-variable "domain_name" {
-  description = "Domain name for SSL certificate"
+variable "alert_email" {
+  description = "Email address for alerts"
   type        = string
   default     = ""
+
+  validation {
+    condition     = var.alert_email == "" || can(regex("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$", var.alert_email))
+    error_message = "Alert email must be a valid email address."
+  }
 }
 
-# Tags
-variable "additional_tags" {
-  description = "Additional tags to apply to all resources"
-  type        = map(string)
-  default     = {}
+# Alarm thresholds
+variable "cpu_threshold" {
+  description = "CPU utilization threshold for alarms"
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.cpu_threshold >= 1 && var.cpu_threshold <= 100
+    error_message = "CPU threshold must be between 1 and 100."
+  }
+}
+
+variable "memory_threshold" {
+  description = "Memory utilization threshold for alarms"
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.memory_threshold >= 1 && var.memory_threshold <= 100
+    error_message = "Memory threshold must be between 1 and 100."
+  }
+}
+
+variable "disk_threshold" {
+  description = "Disk utilization threshold for alarms"
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.disk_threshold >= 1 && var.disk_threshold <= 100
+    error_message = "Disk threshold must be between 1 and 100."
+  }
+}
+
+variable "error_threshold" {
+  description = "Error count threshold for alarms"
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.error_threshold >= 0
+    error_message = "Error threshold must be non-negative."
+  }
 }

@@ -1,0 +1,311 @@
+name: Reusable CD Workflow
+
+on:
+  workflow_call:
+    inputs:
+      application:
+        required: true
+        type: string
+        description: 'Application name (server or client)'
+      image_name:
+        required: true
+        type: string
+        description: 'Docker image name (without registry/username prefix)'
+      port:
+        required: true
+        type: number
+        description: 'Application port'
+      health_check_path:
+        required: false
+        type: string
+        default: '/'
+        description: 'Health check path'
+      environment:
+        required: false
+        type: string
+        default: 'prod'
+        description: 'Deployment environment'
+      deployment_timeout:
+        required: false
+        type: number
+        default: 300
+        description: 'Deployment timeout in seconds'
+      rollback_enabled:
+        required: false
+        type: boolean
+        default: true
+        description: 'Enable automatic rollback on failure'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      DOCKERHUB_USERNAME:
+        required: true
+      EC2_INSTANCE_ID:
+        required: true
+      SLACK_WEBHOOK:
+        required: false
+
+env:
+  AWS_REGION: ap-southeast-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    outputs:
+      deployment-status: ${{ steps.deploy.outcome }}
+      instance-ip: ${{ steps.get-instance-ip.outputs.ip }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Get instance IP
+      id: get-instance-ip
+      run: |
+        INSTANCE_IP=$(aws ec2 describe-instances \
+          --instance-ids ${{ secrets.EC2_INSTANCE_ID }} \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text)
+        echo "ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
+        echo "Instance IP: $INSTANCE_IP"
+
+    - name: Deploy application
+      id: deploy
+      run: |
+        # Get the image tag from the triggering CI workflow
+        IMAGE_TAG="${GITHUB_REF_NAME}-$(echo $GITHUB_SHA | cut -c1-7)"
+        
+        echo "Deploying ${{ inputs.application }} with tag: $IMAGE_TAG"
+        
+        # Create deployment script
+        cat > deploy-script.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        APP_NAME="${{ inputs.application }}"
+        IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.image_name }}"
+        IMAGE_TAG="$1"
+        PORT="${{ inputs.port }}"
+        ENVIRONMENT="${{ inputs.environment }}"
+        
+        echo "Deploying $APP_NAME with image $IMAGE_NAME:$IMAGE_TAG"
+        
+        # Create backup of current container (for rollback)
+        if docker ps -a --format "table {{.Names}}" | grep -q "^tms-$APP_NAME$"; then
+          echo "Creating backup of current container..."
+          docker stop tms-$APP_NAME || true
+          docker rename tms-$APP_NAME tms-$APP_NAME-backup || true
+        fi
+        
+        # Pull new image
+        echo "Pulling new image..."
+        docker pull $IMAGE_NAME:$IMAGE_TAG
+        
+        # Run new container based on application type
+        if [ "$APP_NAME" = "server" ]; then
+          docker run -d \
+            --name tms-$APP_NAME \
+            --restart unless-stopped \
+            -p $PORT:$PORT \
+            -e SPRING_PROFILES_ACTIVE=$ENVIRONMENT \
+            -e SERVER_PORT=$PORT \
+            $IMAGE_NAME:$IMAGE_TAG
+        else
+          docker run -d \
+            --name tms-$APP_NAME \
+            --restart unless-stopped \
+            -p $PORT:80 \
+            -e ENVIRONMENT=$ENVIRONMENT \
+            $IMAGE_NAME:$IMAGE_TAG
+        fi
+        
+        # Health check
+        echo "Performing health check..."
+        sleep 30
+        
+        if [ "$APP_NAME" = "server" ]; then
+          HEALTH_URL="http://localhost:$PORT${{ inputs.health_check_path }}"
+        else
+          HEALTH_URL="http://localhost${{ inputs.health_check_path }}"
+        fi
+        
+        if curl -f --connect-timeout 30 --max-time 60 "$HEALTH_URL"; then
+          echo "Health check passed"
+          # Remove backup container if deployment successful
+          docker rm tms-$APP_NAME-backup 2>/dev/null || true
+        else
+          echo "Health check failed"
+          exit 1
+        fi
+        
+        echo "Deployment successful!"
+        EOF
+        
+        # Make script executable and execute
+        chmod +x deploy-script.sh
+        
+        # Execute deployment script on EC2 instance via SSM
+        COMMAND_ID=$(aws ssm send-command \
+          --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "commands=[\"$(cat deploy-script.sh | base64 -w 0 | base64 -d)\"]" \
+          --timeout-seconds ${{ inputs.deployment_timeout }} \
+          --comment "Deploy TMS ${{ inputs.application }} ${IMAGE_TAG}" \
+          --query 'Command.CommandId' \
+          --output text)
+        
+        echo "SSM Command ID: $COMMAND_ID"
+        echo "command-id=$COMMAND_ID" >> $GITHUB_OUTPUT
+        
+        # Wait for command to complete
+        echo "Waiting for deployment to complete..."
+        aws ssm wait command-executed \
+          --command-id "$COMMAND_ID" \
+          --instance-id "${{ secrets.EC2_INSTANCE_ID }}"
+        
+        # Get command status
+        STATUS=$(aws ssm get-command-invocation \
+          --command-id "$COMMAND_ID" \
+          --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
+          --query 'Status' \
+          --output text)
+        
+        if [ "$STATUS" != "Success" ]; then
+          echo "Deployment failed with status: $STATUS"
+          # Get error details
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
+            --query 'StandardErrorContent' \
+            --output text
+          exit 1
+        fi
+
+    - name: Verify deployment
+      run: |
+        echo "Verifying deployment..."
+        
+        if [ "${{ inputs.application }}" = "server" ]; then
+          HEALTH_URL="http://${{ steps.get-instance-ip.outputs.ip }}:${{ inputs.port }}${{ inputs.health_check_path }}"
+        else
+          HEALTH_URL="http://${{ steps.get-instance-ip.outputs.ip }}${{ inputs.health_check_path }}"
+        fi
+        
+        echo "Testing URL: $HEALTH_URL"
+        
+        # Wait a bit for the service to be fully ready
+        sleep 15
+        
+        # Retry health check multiple times
+        for i in {1..5}; do
+          if curl -f --connect-timeout 10 --max-time 30 "$HEALTH_URL"; then
+            echo "✅ Health check passed on attempt $i"
+            break
+          else
+            echo "❌ Health check failed on attempt $i"
+            if [ $i -eq 5 ]; then
+              echo "All health check attempts failed"
+              exit 1
+            fi
+            sleep 10
+          fi
+        done
+
+  rollback:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: failure() && inputs.rollback_enabled
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Rollback deployment
+      run: |
+        echo "🔄 Starting rollback process..."
+        
+        # Create rollback script
+        cat > rollback-script.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        APP_NAME="${{ inputs.application }}"
+        
+        echo "Rolling back $APP_NAME deployment..."
+        
+        # Stop failed container
+        docker stop tms-$APP_NAME || true
+        docker rm tms-$APP_NAME || true
+        
+        # Restore backup container if it exists
+        if docker ps -a --format "table {{.Names}}" | grep -q "^tms-$APP_NAME-backup$"; then
+          echo "Restoring from backup..."
+          docker rename tms-$APP_NAME-backup tms-$APP_NAME
+          docker start tms-$APP_NAME
+          echo "Rollback completed successfully"
+        else
+          echo "No backup container found, pulling latest tag..."
+          docker run -d \
+            --name tms-$APP_NAME \
+            --restart unless-stopped \
+            -p ${{ inputs.port }}:${{ inputs.port }} \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.image_name }}:latest
+        fi
+        EOF
+        
+        # Execute rollback
+        aws ssm send-command \
+          --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "commands=[\"$(cat rollback-script.sh)\"]" \
+          --comment "Rollback TMS ${{ inputs.application }}"
+
+  notify:
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Notify deployment status
+      if: always()
+      env:
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      run: |
+        if [ -n "$SLACK_WEBHOOK" ]; then
+          STATUS="${{ needs.deploy.result }}"
+          EMOJI="✅"
+          if [ "$STATUS" != "success" ]; then
+            EMOJI="❌"
+          fi
+          
+          curl -X POST "$SLACK_WEBHOOK" \
+            -H 'Content-type: application/json' \
+            --data '{
+              "text": "'$EMOJI' ${{ inputs.application }} Deployment '$STATUS'",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*${{ inputs.application }} Deployment '$STATUS'*\n\n*Repository:* ${{ github.repository }}\n*Branch:* ${{ github.ref_name }}\n*Commit:* ${{ github.sha }}\n*Author:* ${{ github.actor }}\n*Instance:* ${{ secrets.EC2_INSTANCE_ID }}\n*URL:* http://${{ needs.deploy.outputs.instance-ip }}:${{ inputs.port }}"
+                  }
+                }
+              ]
+            }'
+        else
+          echo "Slack webhook not configured, skipping notification..."
+        fi
