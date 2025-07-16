@@ -1,0 +1,36 @@
+# Docker ignore file cho tms-server
+# Loại trừ những file không cần thiết khỏi Docker build context
+
+# Maven build outputs
+target/
+*.jar
+*.war
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation (không cần trong container)
+README.md
+docs/

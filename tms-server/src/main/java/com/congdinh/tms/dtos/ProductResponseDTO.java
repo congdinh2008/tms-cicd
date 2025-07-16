@@ -1,41 +1,22 @@
-package com.congdinh.tms.entities;
-
-import jakarta.persistence.*;
+package com.congdinh.tms.dtos;
 
 /**
- * Product Entity - Đại diện cho bảng products trong database
- * Sử dụng JPA annotations để mapping với PostgreSQL
+ * ProductResponseDTO - Data Transfer Object cho việc trả về thông tin Product
+ * Chỉ bao gồm các thông tin cần thiết để hiển thị
  */
-@Entity
-@Table(name = "products")
-public class Product {
-    
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+public class ProductResponseDTO {
+
     private Long id;
-    
-    @Column(name = "name", nullable = false, length = 255)
     private String name;
-    
-    @Column(name = "description", columnDefinition = "TEXT")
     private String description;
-    
-    @Column(name = "price", nullable = false)
     private double price;
 
-    // Default constructor (required by JPA)
-    public Product() {
+    // Default constructor
+    public ProductResponseDTO() {
     }
 
-    // Constructor với tất cả fields trừ id (auto-generated)
-    public Product(String name, String description, double price) {
-        this.name = name;
-        this.description = description;
-        this.price = price;
-    }
-
-    // Constructor với tất cả fields (for testing)
-    public Product(Long id, String name, String description, double price) {
+    // Constructor with all fields
+    public ProductResponseDTO(Long id, String name, String description, double price) {
         this.id = id;
         this.name = name;
         this.description = description;
@@ -75,10 +56,9 @@ public class Product {
         this.price = price;
     }
 
-    // toString method for debugging
     @Override
     public String toString() {
-        return "Product{" +
+        return "ProductResponseDTO{" +
                 "id=" + id +
                 ", name='" + name + '\'' +
                 ", description='" + description + '\'' +
