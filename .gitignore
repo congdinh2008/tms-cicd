@@ -1,0 +1,30 @@
+# Terraform
+**/terraform.tfvars
+
+# Environment variables - QUAN TRỌNG: Không commit thông tin nhạy cảm
+.env
+
+# Database data (local development)
+postgres_data/
+pgadmin_data/
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
