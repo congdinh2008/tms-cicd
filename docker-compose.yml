@@ -1,0 +1,126 @@
+# Docker Compose configuration for TMS (Task Management System)
+# Sử dụng .env file để quản lý environment variables
+
+services:
+  # PostgreSQL Database Service
+  tms-db:
+    container_name: tms_postgres_container
+    image: postgres:16.0-alpine  # Sử dụng alpine để giảm kích thước image
+    environment:
+      # Sử dụng environment variables từ .env file
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Tối ưu PostgreSQL cho development
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persistent data storage
+      - postgres_data:/var/lib/postgresql/data
+      # Custom init scripts (nếu cần)
+      - ./scripts/db-init:/docker-entrypoint-initdb.d
+    networks:
+      - tms_network
+    restart: unless-stopped
+    # Health check để đảm bảo database sẵn sàng
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} && psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # pgAdmin Database Administration Tool
+  pgadmin:
+    container_name: tms_pgadmin_container
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'  # Disable server mode for simplicity
+    ports:
+      - "1999:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      # Pre-configured servers (optional)
+      - ./config/pgadmin/servers.json:/pgadmin4/servers.json
+    networks:
+      - tms_network
+    restart: unless-stopped
+    depends_on:
+      tms-db:
+        condition: service_healthy
+
+  # Spring Boot Backend Service
+  tms-server:
+    build:
+      context: ./tms-server
+      dockerfile: Dockerfile
+    container_name: tms_server_container
+    image: ${TMS_SERVER_IMAGE}
+    environment:
+      # Database connection từ .env
+      POSTGRES_HOST: tms-db
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Spring profiles
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE}
+    ports:
+      - "1990:8080"
+    networks:
+      - tms_network
+    restart: unless-stopped
+    depends_on:
+      tms-db:
+        condition: service_healthy
+    # Health check cho Spring Boot
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # React Frontend Service
+  tms-client:
+    build:
+      context: ./tms-client
+      dockerfile: Dockerfile
+      # Build arguments cho production build
+      args:
+        - VITE_API_BASE_URL=http://localhost:1990
+    container_name: tms_client_container
+    image: ${TMS_CLIENT_IMAGE}
+    ports:
+      - "2025:80"
+    networks:
+      - tms_network
+    restart: unless-stopped
+    depends_on:
+      tms-server:
+        condition: service_healthy
+
+# Network configuration
+networks:
+  tms_network:
+    driver: bridge
+    # Tạo isolated network cho security
+    internal: false
+
+# Volume configuration
+volumes:
+  postgres_data:
+    driver: local
+    # Labels for better management
+    labels:
+      - "com.tms.description=PostgreSQL data volume"
+      - "com.tms.environment=development"
+  
+  pgadmin_data:
+    driver: local
+    labels:
+      - "com.tms.description=pgAdmin configuration volume"
+      - "com.tms.environment=development"
