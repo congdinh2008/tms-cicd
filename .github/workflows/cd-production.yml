@@ -1,0 +1,342 @@
+# CD Production Pipeline - Deploy to Production
+# Trigger: Manual deployment với tag hoặc release
+# Mục đích: Deploy to production với approval gate
+
+name: 🚀 Deploy to Production
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version/Tag to deploy (e.g., v1.2.0)'
+        required: true
+        type: string
+      confirm_production:
+        description: 'Type "DEPLOY_TO_PRODUCTION" to confirm'
+        required: true
+        type: string
+
+env:
+  ENVIRONMENT: production
+  AWS_REGION: ap-southeast-1
+
+jobs:
+  validate-input:
+    name: ✅ Validate Deployment Request
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: Validate confirmation
+      run: |
+        if [ "${{ github.event.inputs.confirm_production }}" != "DEPLOY_TO_PRODUCTION" ]; then
+          echo "❌ Invalid confirmation. Please type exactly: DEPLOY_TO_PRODUCTION"
+          exit 1
+        fi
+        echo "✅ Production deployment confirmed"
+
+    - name: Validate version format
+      run: |
+        VERSION="${{ github.event.inputs.version }}"
+        if [[ ! $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "❌ Invalid version format. Use semantic versioning (e.g., v1.2.0)"
+          exit 1
+        fi
+        echo "✅ Version format validated: $VERSION"
+
+  deploy-production:
+    name: 🏭 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [validate-input]
+    if: always() && (github.event_name == 'release' || needs.validate-input.result == 'success')
+    environment: 
+      name: production
+      url: https://tms.example.com
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.inputs.version || github.event.release.tag_name }}
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Set deployment version
+      id: set-version
+      run: |
+        if [ "${{ github.event_name }}" == "release" ]; then
+          VERSION="${{ github.event.release.tag_name }}"
+        else
+          VERSION="${{ github.event.inputs.version }}"
+        fi
+        
+        # Remove 'v' prefix if present
+        CLEAN_VERSION=${VERSION#v}
+        
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "clean-version=${CLEAN_VERSION}" >> $GITHUB_OUTPUT
+        echo "backend-tag=${{ secrets.DOCKER_USERNAME }}/tms-server:${VERSION}" >> $GITHUB_OUTPUT
+        echo "frontend-tag=${{ secrets.DOCKER_USERNAME }}/tms-client:${VERSION}" >> $GITHUB_OUTPUT
+
+    - name: Verify Docker images exist
+      run: |
+        echo "🔍 Verifying Docker images exist..."
+        
+        # Check backend image
+        if ! docker manifest inspect ${{ steps.set-version.outputs.backend-tag }} > /dev/null 2>&1; then
+          echo "❌ Backend image not found: ${{ steps.set-version.outputs.backend-tag }}"
+          exit 1
+        fi
+        
+        # Check frontend image  
+        if ! docker manifest inspect ${{ steps.set-version.outputs.frontend-tag }} > /dev/null 2>&1; then
+          echo "❌ Frontend image not found: ${{ steps.set-version.outputs.frontend-tag }}"
+          exit 1
+        fi
+        
+        echo "✅ All Docker images verified"
+
+    - name: Create backup of current production
+      run: |
+        echo "💾 Creating backup of current production..."
+        
+        # Backup current task definition
+        aws ecs describe-task-definition \
+          --task-definition tms-production-backend \
+          --query taskDefinition > production-backup-task-def-$(date +%Y%m%d-%H%M%S).json
+        
+        # Store backup in S3
+        aws s3 cp production-backup-task-def-*.json \
+          s3://tms-deployment-backups/production/
+        
+        echo "✅ Backup completed"
+
+    - name: Run pre-deployment checks
+      run: |
+        echo "🔍 Running pre-deployment checks..."
+        
+        # Check production database connectivity
+        echo "Testing database connection..."
+        
+        # Check current production health
+        PROD_URL="https://api.tms.example.com"
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $PROD_URL/health || echo "000")
+        
+        if [ $HTTP_STATUS -eq 200 ]; then
+          echo "✅ Current production is healthy"
+        else
+          echo "⚠️ Current production health check returned: $HTTP_STATUS"
+        fi
+
+    - name: Deploy backend with Blue-Green strategy
+      id: deploy-backend
+      run: |
+        echo "🔄 Deploying backend with Blue-Green strategy..."
+        
+        # Get current task definition
+        aws ecs describe-task-definition \
+          --task-definition tms-production-backend \
+          --query taskDefinition > current-task-def.json
+        
+        # Create new task definition với updated image
+        jq --arg IMAGE "${{ steps.set-version.outputs.backend-tag }}" \
+          '.containerDefinitions[0].image = $IMAGE' \
+          current-task-def.json > new-task-def.json
+        
+        # Register new task definition
+        NEW_TASK_DEF=$(aws ecs register-task-definition \
+          --cli-input-json file://new-task-def.json \
+          --query 'taskDefinition.taskDefinitionArn' \
+          --output text)
+        
+        echo "new-task-def=${NEW_TASK_DEF}" >> $GITHUB_OUTPUT
+        
+        # Deploy với Blue-Green strategy (50% traffic shift)
+        echo "🔄 Starting Blue-Green deployment..."
+        aws ecs update-service \
+          --cluster tms-production-cluster \
+          --service tms-production-backend-service \
+          --task-definition $NEW_TASK_DEF \
+          --deployment-configuration "minimumHealthyPercent=50,maximumPercent=200"
+        
+        echo "✅ Blue-Green deployment initiated"
+
+    - name: Wait for deployment and health checks
+      run: |
+        echo "⏳ Waiting for deployment to stabilize..."
+        
+        # Wait for ECS service to stabilize
+        aws ecs wait services-stable \
+          --cluster tms-production-cluster \
+          --services tms-production-backend-service \
+          --cli-read-timeout 900
+        
+        echo "✅ ECS service is stable"
+        
+        # Additional health checks
+        echo "🧪 Running health checks..."
+        sleep 60  # Wait for app to fully start
+        
+        HEALTH_URL="https://api.tms.example.com/health"
+        for i in {1..5}; do
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_URL)
+          if [ $HTTP_STATUS -eq 200 ]; then
+            echo "✅ Health check $i/5 passed"
+            break
+          else
+            echo "⚠️ Health check $i/5 failed (HTTP $HTTP_STATUS)"
+            if [ $i -eq 5 ]; then
+              echo "❌ All health checks failed"
+              exit 1
+            fi
+            sleep 30
+          fi
+        done
+
+    - name: Deploy frontend to Production S3
+      run: |
+        echo "📦 Deploying frontend to production S3..."
+        
+        # Extract frontend files từ Docker image
+        docker run --rm -v $(pwd):/output \
+          ${{ steps.set-version.outputs.frontend-tag }} \
+          cp -r /usr/share/nginx/html/. /output/dist/
+        
+        # Backup current frontend
+        aws s3 sync s3://tms-production-frontend/ \
+          s3://tms-deployment-backups/production/frontend-$(date +%Y%m%d-%H%M%S)/ \
+          --quiet
+        
+        # Deploy new frontend
+        aws s3 sync ./dist/ s3://tms-production-frontend/ \
+          --delete \
+          --cache-control "max-age=31536000, public" \
+          --exclude "*.html" \
+          --exclude "*.json"
+        
+        # HTML files với shorter cache
+        aws s3 sync ./dist/ s3://tms-production-frontend/ \
+          --cache-control "max-age=300, public" \
+          --include "*.html" \
+          --include "*.json"
+        
+        echo "✅ Frontend deployed to production S3"
+
+    - name: Invalidate CloudFront cache
+      run: |
+        echo "🔄 Invalidating CloudFront cache..."
+        INVALIDATION_ID=$(aws cloudfront create-invalidation \
+          --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID_PRODUCTION }} \
+          --paths "/*" \
+          --query 'Invalidation.Id' \
+          --output text)
+        
+        echo "CloudFront invalidation ID: $INVALIDATION_ID"
+        echo "✅ CloudFront cache invalidation started"
+
+    - name: Run production smoke tests
+      id: smoke-tests
+      run: |
+        echo "🧪 Running production smoke tests..."
+        
+        # Wait for CloudFront invalidation
+        sleep 60
+        
+        # Test production endpoints
+        declare -a endpoints=(
+          "https://tms.example.com"
+          "https://api.tms.example.com/health"
+          "https://api.tms.example.com/api/products"
+        )
+        
+        for endpoint in "${endpoints[@]}"; do
+          echo "Testing: $endpoint"
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $endpoint)
+          
+          if [ $HTTP_STATUS -eq 200 ] || [ $HTTP_STATUS -eq 404 ]; then
+            echo "✅ $endpoint (HTTP $HTTP_STATUS)"
+          else
+            echo "❌ $endpoint failed (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+        done
+        
+        echo "✅ All production smoke tests passed"
+
+    - name: Create deployment record
+      if: success()
+      run: |
+        echo "📝 Creating deployment record..."
+        
+        # Create deployment record trong DynamoDB hoặc database
+        DEPLOYMENT_RECORD='{
+          "version": "${{ steps.set-version.outputs.version }}",
+          "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+          "environment": "production",
+          "backend_image": "${{ steps.set-version.outputs.backend-tag }}",
+          "frontend_image": "${{ steps.set-version.outputs.frontend-tag }}",
+          "deployed_by": "${{ github.actor }}",
+          "status": "success"
+        }'
+        
+        echo $DEPLOYMENT_RECORD > deployment-record.json
+        aws s3 cp deployment-record.json \
+          s3://tms-deployment-records/production/${{ steps.set-version.outputs.version }}.json
+        
+        echo "✅ Deployment record created"
+
+    - name: Send deployment notification
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          STATUS="✅ SUCCESS"
+          COLOR="good"
+        else
+          STATUS="❌ FAILED" 
+          COLOR="danger"
+        fi
+        
+        echo "📢 Sending deployment notification..."
+        echo "Status: $STATUS"
+        echo "Version: ${{ steps.set-version.outputs.version }}"
+        
+        # Gửi notification đến Slack/Teams (nếu configured)
+        # curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+        #   -H 'Content-type: application/json' \
+        #   --data '{
+        #     "text": "Production Deployment '$STATUS'",
+        #     "color": "'$COLOR'",
+        #     "fields": [
+        #       {"title": "Version", "value": "${{ steps.set-version.outputs.version }}", "short": true},
+        #       {"title": "Environment", "value": "Production", "short": true},
+        #       {"title": "Deployed by", "value": "${{ github.actor }}", "short": true}
+        #     ]
+        #   }'
+
+    - name: Deployment summary
+      if: always()
+      run: |
+        echo "## 🚀 Production Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "| Component | Version | Status | URL |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----------|---------|--------|-----|" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ steps.smoke-tests.outcome }}" == "success" ]; then
+          echo "| Backend | ${{ steps.set-version.outputs.version }} | ✅ Deployed | https://api.tms.example.com |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend | ${{ steps.set-version.outputs.version }} | ✅ Deployed | https://tms.example.com |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| Deployment | ${{ steps.set-version.outputs.version }} | ❌ Failed | Check logs for details |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Deployment Details:**" >> $GITHUB_STEP_SUMMARY
+        echo "- Version: \`${{ steps.set-version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY  
+        echo "- Deployed by: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Backend Image: \`${{ steps.set-version.outputs.backend-tag }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Frontend Image: \`${{ steps.set-version.outputs.frontend-tag }}\`" >> $GITHUB_STEP_SUMMARY

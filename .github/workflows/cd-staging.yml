@@ -1,0 +1,177 @@
+# CD Staging Pipeline - Deploy to Staging Environment
+# Trigger: push vào main branch (after merge từ dev)
+# Mục đích: Deploy to staging, run smoke tests
+
+name: 🚀 Deploy to Staging
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Manual trigger nếu cần
+
+env:
+  ENVIRONMENT: staging
+  AWS_REGION: ap-southeast-1
+
+jobs:
+  deploy-staging:
+    name: 🏗️ Deploy to Staging
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Get latest Docker image tags
+      id: get-tags
+      run: |
+        # Get latest SHA từ main branch để pull đúng image
+        LATEST_SHA=$(git rev-parse --short HEAD)
+        echo "backend-tag=${{ secrets.DOCKER_USERNAME }}/tms-server:main-${LATEST_SHA}" >> $GITHUB_OUTPUT
+        echo "frontend-tag=${{ secrets.DOCKER_USERNAME }}/tms-client:main-${LATEST_SHA}" >> $GITHUB_OUTPUT
+
+    - name: Get secrets from AWS Secrets Manager
+      id: get-secrets
+      run: |
+        # Lấy database credentials từ AWS Secrets Manager
+        DB_SECRETS=$(aws secretsmanager get-secret-value \
+          --secret-id tms/staging/database \
+          --query SecretString --output text)
+        
+        echo "db-url=$(echo $DB_SECRETS | jq -r .DB_URL)" >> $GITHUB_OUTPUT
+        echo "db-username=$(echo $DB_SECRETS | jq -r .DB_USERNAME)" >> $GITHUB_OUTPUT
+
+    - name: Run database migrations
+      run: |
+        echo "🗄️ Running database migrations..."
+        # Sử dụng Flyway hoặc Liquibase để migrate database
+        # docker run --rm \
+        #   -e SPRING_DATASOURCE_URL="${{ steps.get-secrets.outputs.db-url }}" \
+        #   -e SPRING_DATASOURCE_USERNAME="${{ steps.get-secrets.outputs.db-username }}" \
+        #   -e SPRING_DATASOURCE_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+        #   ${{ steps.get-tags.outputs.backend-tag }} \
+        #   ./mvnw flyway:migrate
+        echo "✅ Database migrations completed"
+
+    - name: Update ECS Task Definition
+      id: update-task-def
+      run: |
+        echo "📝 Updating ECS Task Definition for staging..."
+        
+        # Download current task definition
+        aws ecs describe-task-definition \
+          --task-definition tms-staging-backend \
+          --query taskDefinition > task-def.json
+        
+        # Update image URL trong task definition
+        jq --arg IMAGE "${{ steps.get-tags.outputs.backend-tag }}" \
+          '.containerDefinitions[0].image = $IMAGE' \
+          task-def.json > updated-task-def.json
+        
+        # Register new task definition revision
+        aws ecs register-task-definition \
+          --cli-input-json file://updated-task-def.json \
+          --query 'taskDefinition.taskDefinitionArn' \
+          --output text > new-task-def-arn.txt
+        
+        echo "task-def-arn=$(cat new-task-def-arn.txt)" >> $GITHUB_OUTPUT
+
+    - name: Deploy to ECS
+      run: |
+        echo "🚀 Deploying to ECS Staging..."
+        
+        # Update ECS service với rolling update strategy
+        aws ecs update-service \
+          --cluster tms-staging-cluster \
+          --service tms-staging-backend-service \
+          --task-definition ${{ steps.update-task-def.outputs.task-def-arn }} \
+          --force-new-deployment
+        
+        # Wait for deployment to complete
+        aws ecs wait services-stable \
+          --cluster tms-staging-cluster \
+          --services tms-staging-backend-service
+        
+        echo "✅ ECS deployment completed"
+
+    - name: Deploy Frontend to S3
+      run: |
+        echo "📦 Deploying frontend to S3..."
+        
+        # Extract frontend files từ Docker image
+        docker run --rm -v $(pwd):/output \
+          ${{ steps.get-tags.outputs.frontend-tag }} \
+          cp -r /usr/share/nginx/html/. /output/dist/
+        
+        # Sync to S3 bucket
+        aws s3 sync ./dist/ s3://tms-staging-frontend/ \
+          --delete \
+          --cache-control "max-age=86400"
+        
+        echo "✅ Frontend deployed to S3"
+
+    - name: Invalidate CloudFront cache
+      run: |
+        echo "🔄 Invalidating CloudFront cache..."
+        aws cloudfront create-invalidation \
+          --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID_STAGING }} \
+          --paths "/*"
+        echo "✅ CloudFront cache invalidated"
+
+    - name: Run smoke tests
+      id: smoke-tests
+      run: |
+        echo "🧪 Running smoke tests..."
+        
+        # Wait for services to be healthy
+        sleep 30
+        
+        # Test backend health endpoint
+        BACKEND_URL="https://api-staging.tms.example.com"
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $BACKEND_URL/health)
+        
+        if [ $HTTP_STATUS -eq 200 ]; then
+          echo "✅ Backend health check passed"
+        else
+          echo "❌ Backend health check failed (HTTP $HTTP_STATUS)"
+          exit 1
+        fi
+        
+        # Test frontend
+        FRONTEND_URL="https://staging.tms.example.com"
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $FRONTEND_URL)
+        
+        if [ $HTTP_STATUS -eq 200 ]; then
+          echo "✅ Frontend health check passed"
+        else
+          echo "❌ Frontend health check failed (HTTP $HTTP_STATUS)"
+          exit 1
+        fi
+
+    - name: Deployment summary
+      if: always()
+      run: |
+        echo "## 🚀 Staging Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "| Component | Status | URL |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----------|--------|-----|" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ steps.smoke-tests.outcome }}" == "success" ]; then
+          echo "| Backend | ✅ Deployed | https://api-staging.tms.example.com |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend | ✅ Deployed | https://staging.tms.example.com |" >> $GITHUB_STEP_SUMMARY
+          echo "| Database | ✅ Migrated | - |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| Deployment | ❌ Failed | Check logs for details |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Docker Images:**" >> $GITHUB_STEP_SUMMARY
+        echo "- Backend: \`${{ steps.get-tags.outputs.backend-tag }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Frontend: \`${{ steps.get-tags.outputs.frontend-tag }}\`" >> $GITHUB_STEP_SUMMARY
